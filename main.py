@@ -1,35 +1,42 @@
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer, CrossEncoder, util
 import numpy as np
-import re
+import json
 
-model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+# Загрузка моделей (используем существующие модели)
+bi_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')  # Для поиска кандидатов
+cross_model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')  # Рабочая мультиязычная модель
 
-faq = {
-    "Как связаться с техподдержкой?": "Напишите на support@example.com или позвоните по номеру +7 (XXX) XXX-XX-XX.",
-    "Где найти контакты поддержки?": "Контакты службы поддержки: email support@example.com, телефон +7 (XXX) XXX-XX-XX.",
-    "Куда обращаться за помощью?": "Обратитесь в поддержку: support@example.com.",
-}
-
+# Загрузка датасета
+with open('dataset.json', 'r', encoding='utf-8') as f:
+    faq = {item['question']: item['answer'] for item in json.load(f)}
 questions = list(faq.keys())
-question_embeddings = model.encode(questions, convert_to_tensor=True)
 
-def normalize_text(text):
-    text = text.lower().strip()
-    text = re.sub(r'[^\w\s]', '', text)  # Удаляем пунктуацию
-    return text
+# Предварительное кодирование вопросов
+question_embeddings = bi_model.encode(questions, convert_to_tensor=True)
 
-def get_answer(user_question, threshold=0.4):
-    user_question = normalize_text(user_question)
-    user_embedding = model.encode(user_question, convert_to_tensor=True)
+def get_answer(user_question):
+    # Этап 1: Быстрый поиск кандидатов
+    user_embedding = bi_model.encode(user_question, convert_to_tensor=True)
     similarities = util.pytorch_cos_sim(user_embedding, question_embeddings)[0]
+    candidate_indices = np.where(similarities > 0.4)[0]  # Берем все с похожестью >40%
     
-    best_match_idx = np.argmax(similarities).item()
-    best_score = similarities[best_match_idx].item()
+    if len(candidate_indices) == 0:
+        return "Извините, не нашел подходящего ответа."
     
-    if best_score >= threshold:
-        return faq[questions[best_match_idx]]
-    else:
-        return f"Извините, я не нашел ответа (лучший вариант: '{questions[best_match_idx]}' сходство={best_score:.2f})."
+    # Этап 2: Точное ранжирование кандидатов
+    candidates = [(user_question, questions[i]) for i in candidate_indices]
+    scores = cross_model.predict(candidates)
+    best_idx = candidate_indices[np.argmax(scores)]
+    
+    return faq[questions[best_idx]]
 
-# Тест
-print(get_answer("поддержка"))
+# Тестирование
+test_questions = [
+    "как подать документы",
+    "что нужно для поступления",
+    "проходные баллы"
+]
+
+for q in test_questions:
+    print(f"Вопрос: {q}")
+    print(f"Ответ: {get_answer(q)}\n")
